@@ -376,10 +376,11 @@ function aiTaskContext() {
 function aiErrorMessage(error) {
   const detail = ((error?.code || '') + ' ' + (error?.message || '')).toLowerCase();
   const code = String(error?.code || (/\b403\b/.test(detail) ? 'HTTP 403' : error?.name || 'unknown')).replace(/[^a-z0-9._/-]/gi, '').slice(0, 80);
-  if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return `App Check 驗證失敗（${code}）。請把括號內代碼傳給我。`;
+  const reason = String(error?.message || error?.cause?.message || '').replace(/\s+/g, ' ').replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted]').replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 180);
+  if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return `App Check 驗證失敗（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
   if (/429|quota|resource_exhausted/.test(detail)) return `Gemini 使用量可能已達上限（${code}），請稍後再試。`;
   if (/network|fetch|unavailable/.test(detail)) return `目前無法連線到 Gemini（${code}），請檢查網路後重試。`;
-  return `AI 暫時無法回覆（${code}），請把括號內代碼傳給我。`;
+  return `AI 暫時無法回覆（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
 }
 async function submitAiQuestion(rawQuestion) {
   const question = rawQuestion.trim();
