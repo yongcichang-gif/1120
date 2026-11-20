@@ -402,6 +402,7 @@ async function submitAiQuestion(rawQuestion) {
   const userId = currentUser.uid;
   const requestController = new AbortController();
   aiAbortController = requestController;
+  let requestStage = '連線到 Firebase AI（包含 App Check 驗證）';
   let timeoutId = null;
   aiBusy = true;
   updateAiAvailability();
@@ -417,21 +418,15 @@ async function submitAiQuestion(rawQuestion) {
       '使用者問題：' + question
     ].join('\n\n');
     const requestPromise = (async () => {
-      const result = await aiChat.sendMessageStream(prompt, { signal: requestController.signal, timeout: 60000 });
-      let answer = '';
-      for await (const chunk of result.stream) {
-        if (generationId !== aiGenerationId || currentUser?.uid !== userId || requestController.signal.aborted) return '';
-        answer += chunk.text();
-        answerBubble.textContent = answer || '正在整理你的行程…';
-        aiMessages.scrollTop = aiMessages.scrollHeight;
-      }
-      await result.response;
-      return answer;
+      const result = await aiChat.sendMessage(prompt, { signal: requestController.signal, timeout: 60000 });
+      requestStage = '讀取 Gemini 回覆';
+      if (generationId !== aiGenerationId || currentUser?.uid !== userId || requestController.signal.aborted) return '';
+      return result.response.text();
     })();
     requestPromise.catch(() => {});
     const timeoutPromise = new Promise((resolve, reject) => {
       timeoutId = setTimeout(() => {
-        const error = new Error('AI request timed out');
+        const error = new Error(`AI request timed out during ${requestStage}`);
         error.name = 'TimeoutError';
         reject(error);
         requestController.abort();
