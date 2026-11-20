@@ -221,7 +221,7 @@ try {
   aiModel = getGenerativeModel(ai, {
     model: 'gemini-3.8-flash',
     generationConfig: { temperature: 0.35, maxOutputTokens: 700, candidateCount: 1 }
-  });
+  }, { timeout: 60000 });
   appCheckReady = Boolean(appCheck);
 } catch (error) {
   console.error('Firebase AI Logic initialization failed:', error);
@@ -311,6 +311,7 @@ const aiStatus = document.getElementById('aiStatus');
 let aiChat = null;
 let aiBusy = false;
 let aiGenerationId = 0;
+let aiAbortController = null;
 function setAiStatus(message, isError=false) {
   aiStatus.textContent = message;
   aiStatus.classList.toggle('error', isError);
@@ -353,6 +354,8 @@ function toggleAiPanel(open) {
 }
 function resetAiConversation() {
   aiGenerationId++;
+  if (aiAbortController) aiAbortController.abort();
+  aiAbortController = null;
   aiChat = null;
   aiInput.value = '';
   aiMessages.replaceChildren();
@@ -380,6 +383,7 @@ function aiErrorMessage(error) {
   const appCheckAt = fullReason.toLowerCase().indexOf('appcheck:');
   const reason = (appCheckAt >= 0 ? fullReason.slice(appCheckAt) : fullReason).slice(0, 400);
   if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return `App Check 驗證失敗（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
+  if (/timeout|abort/.test(detail)) return '等待 Gemini 回覆超過 60 秒，已停止這次請求。請稍後重試。';
   if (/429|quota|resource_exhausted/.test(detail)) return `Gemini 使用量可能已達上限（${code}），請稍後再試。`;
   if (/network|fetch|unavailable/.test(detail)) return `目前無法連線到 Gemini（${code}），請檢查網路後重試。`;
   return `AI 暫時無法回覆（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
@@ -396,6 +400,9 @@ async function submitAiQuestion(rawQuestion) {
   const answerBubble = addAiBubble('assistant', '正在整理你的行程…');
   const generationId = aiGenerationId;
   const userId = currentUser.uid;
+  const requestController = new AbortController();
+  aiAbortController = requestController;
+  let timeoutId = null;
   aiBusy = true;
   updateAiAvailability();
   try {
@@ -409,23 +416,39 @@ async function submitAiQuestion(rawQuestion) {
       '登入者任務資料（JSON）：' + JSON.stringify(aiTaskContext()),
       '使用者問題：' + question
     ].join('\n\n');
-    const result = await aiChat.sendMessageStream(prompt);
-    let answer = '';
-    for await (const chunk of result.stream) {
-      if (generationId !== aiGenerationId || currentUser?.uid !== userId) return;
-      answer += chunk.text();
-      answerBubble.textContent = answer || '正在整理你的行程…';
-      aiMessages.scrollTop = aiMessages.scrollHeight;
-    }
-    await result.response;
+    const requestPromise = (async () => {
+      const result = await aiChat.sendMessageStream(prompt, { signal: requestController.signal, timeout: 60000 });
+      let answer = '';
+      for await (const chunk of result.stream) {
+        if (generationId !== aiGenerationId || currentUser?.uid !== userId || requestController.signal.aborted) return '';
+        answer += chunk.text();
+        answerBubble.textContent = answer || '正在整理你的行程…';
+        aiMessages.scrollTop = aiMessages.scrollHeight;
+      }
+      await result.response;
+      return answer;
+    })();
+    requestPromise.catch(() => {});
+    const timeoutPromise = new Promise((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        const error = new Error('AI request timed out');
+        error.name = 'TimeoutError';
+        reject(error);
+        requestController.abort();
+      }, 60000);
+    });
+    const answer = await Promise.race([requestPromise, timeoutPromise]);
     if (generationId === aiGenerationId && currentUser?.uid === userId && !answer.trim()) answerBubble.textContent = '我目前無法整理出回答，請換個方式詢問。';
   } catch (error) {
     console.error('Firebase AI Logic request failed:', error);
     if (generationId === aiGenerationId && currentUser?.uid === userId) {
+      if (requestController.signal.aborted) aiChat = null;
       answerBubble.textContent = aiErrorMessage(error);
       setAiStatus('回覆失敗，請確認網路與 App Check 設定後重試。', true);
     }
   } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    if (aiAbortController === requestController) aiAbortController = null;
     if (generationId === aiGenerationId) {
       aiBusy = false;
       updateAiAvailability();
