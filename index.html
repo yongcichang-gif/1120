@@ -62,7 +62,7 @@ board.querySelectorAll('[data-remove-member]').forEach(btn=>btn.onclick=()=>remo
 }
 function editTeamMember(id){const person=people[id];const name=prompt('請輸入團隊成員的新名稱',person.name);if(name===null)return;const clean=name.trim();if(!clean){showToast('名稱不可為空白');return}person.name=clean;person.initial=clean[0];renderTeam();render();showToast('團隊成員資料已更新')}
 async function removeTeamMember(id){if(!requireCloudReady())return;const person=people[id];const assigned=tasks.filter(t=>t.assignee===id);if(!confirm(`確定移除「${person.name}」？${assigned.length?`目前有 ${assigned.length} 項指派任務，移除後會一併刪除。`:''}`))return;const userId=currentUser.uid;try{if(assigned.length){const batch=writeBatch(db);assigned.forEach(task=>batch.delete(doc(db,'users',userId,'tasks',String(task.id))));await batch.commit()}delete people[id];teamMemberIds.splice(teamMemberIds.indexOf(id),1);tasks=tasks.filter(t=>t.assignee!==id);renderTeam();render();showToast('已移除團隊成員')}catch(error){console.error('Assigned task deletion failed:',error);showToast(firestoreErrorMessage(error))}}
-function showToast(msg){let el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>el.classList.remove('show'),2600)}
+function showToast(msg,duration=2600){let el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>el.classList.remove('show'),duration)}
 document.getElementById('filterBtn').onclick=()=>{activeFilter=activeFilter==='all'?'open':activeFilter==='open'?'high':'all';document.getElementById('filterBtn').innerHTML=activeFilter==='all'?'☷　全部任務　⌄':activeFilter==='open'?'☷　未完成　⌄':'☷　高重要性　⌄';render()};document.getElementById('sortBtn').onclick=()=>{showToast('目前已依逾期狀態、截止日、重要性自動排序')};document.getElementById('notificationBtn').onclick=()=>showToast('通知中心：你有 2 項任務今日到期');document.getElementById('focusBtn').onclick=()=>showToast('專注時段已開始 · 25 分鐘');document.getElementById('suggestionBtn').onclick=()=>showToast('建議先完成逾期任務，再處理今天到期的高重要性任務。');document.getElementById('searchBtn').onclick=()=>{let q=prompt('搜尋任務名稱');if(q){let found=tasks.filter(t=>t.assignee==='me'&&t.title.toLowerCase().includes(q.toLowerCase()));showToast(found.length?`找到 ${found.length} 項任務：${found.map(t=>t.title).join('、')}`:'找不到符合的任務')}};
 const viewLabels={board:'優先任務',today:'今日行程',calendar:'行事曆',my:'我的任務',team:'團隊成員',settings:'通知設定'};document.querySelectorAll('.nav button').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');let v=btn.dataset.view;currentView=v;document.getElementById('crumb').textContent=viewLabels[v];if(v==='board'||v==='my'){document.getElementById('boardTitle').innerHTML=(v==='my'?'我的任務':'我的優先任務')+' <span style="color:#9aa49d;font-size:12px;font-weight:450">· 依截止日與重要性排序</span>';render()}else if(v==='settings'){document.getElementById('boardTitle').textContent='通知設定';document.getElementById('board').innerHTML='<div class="stat" style="grid-column:1/-1;display:block"><strong>電子郵件提醒</strong><p style="color:#7c8882">預設於截止前一天寄送提醒。建立任務時可針對個別任務調整時間。</p><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" checked> 啟用電子郵件提醒</label><p style="font-size:11px;color:#a36d38">尚未連結郵件服務；目前為原型展示設定。</p></div>'}else if(v==='team'){document.getElementById('boardTitle').textContent='團隊成員';renderTeam()}else{document.getElementById('boardTitle').textContent=v==='today'?'今日行程':'行事曆';document.getElementById('board').innerHTML='<div class="stat" style="grid-column:1/-1;display:block"><strong>今日，10 月 30 日</strong><p style="color:#7c8882">09:30　整理 Q4 產品發布計畫<br>11:00　確認首頁改版設計稿<br>14:30　團隊週會</p><span class="tag high">2 項任務今天到期</span></div>'}});
 render();
@@ -88,6 +88,31 @@ const googleProvider = new GoogleAuthProvider();
 let currentUser = null;
 let cloudReady = false;
 let stopTaskListener = null;
+
+function authErrorMessage(error) {
+  const code = error?.code || '';
+  switch (code) {
+    case 'auth/unauthorized-domain':
+      return `目前網站網域（${location.hostname}）尚未授權。請在 Firebase Console 的 Authentication → Settings → Authorized domains 加入此網域。`;
+    case 'auth/operation-not-allowed':
+      return 'Firebase 專案尚未啟用 Google 登入。請在 Authentication → Sign-in method 啟用 Google。';
+    case 'auth/popup-blocked':
+      return '瀏覽器封鎖了 Google 登入視窗。請允許此網站開啟彈出式視窗，再重試。';
+    case 'auth/popup-closed-by-user':
+      return 'Google 登入視窗已關閉，登入尚未完成。請重新登入並完成帳戶選擇。';
+    case 'auth/cancelled-popup-request':
+      return '已有 Google 登入視窗正在處理。請先完成該視窗，或稍後再試。';
+    case 'auth/network-request-failed':
+      return '無法連線到 Google 登入服務。請檢查網路、VPN 或瀏覽器擴充功能後重試。';
+    case 'auth/web-storage-unsupported':
+      return '瀏覽器封鎖了登入所需的網站儲存空間。請允許此網站使用 Cookie/網站資料，或改用其他瀏覽器。';
+    case 'auth/invalid-api-key':
+    case 'auth/configuration-not-found':
+      return 'Firebase 網頁設定無效或找不到。請確認網站使用的 Firebase 專案設定。';
+    default:
+      return `Google 登入失敗${code ? `（${code}）` : ''}。請再試一次；若仍失敗，請提供這個錯誤代碼。`;
+  }
+}
 
 function taskData(task) { const {id,...data}=task; return data; }
 function requireCloudReady() {
@@ -160,13 +185,16 @@ onAuthStateChanged(auth, user => {
   } else {
     render();
   }
+}, error => {
+  console.error('Firebase auth state failed:',error);
+  showToast(authErrorMessage(error),6500);
 });
 
 try {
   await getRedirectResult(auth);
 } catch (error) {
   console.error('Google sign-in redirect failed:', error);
-  showToast('Google 登入失敗，請再試一次。');
+  showToast(authErrorMessage(error),6500);
 }
 
 signInButton.addEventListener('click', async () => {
@@ -179,7 +207,7 @@ signInButton.addEventListener('click', async () => {
     }
   } catch (error) {
     console.error('Google sign-in failed:', error);
-    showToast('Google 登入失敗，請確認網路或稍後再試。');
+    showToast(authErrorMessage(error),6500);
   } finally {
     signInButton.disabled = false;
   }
