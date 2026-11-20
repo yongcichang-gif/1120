@@ -193,7 +193,7 @@ render();
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js';
 import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
 import { getFirestore, collection, doc, getDoc, onSnapshot, serverTimestamp, setDoc, writeBatch } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-firestore.js';
-import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app-check.js';
+import { initializeAppCheck, ReCaptchaEnterpriseProvider, getToken } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app-check.js';
 import { getAI, getGenerativeModel, GoogleAIBackend } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-ai.js';
 
 const firebaseConfig = {
@@ -209,8 +209,9 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 let aiModel = null;
 let appCheckReady = false;
+let appCheckInstance = null;
 try {
-  const appCheck = initializeAppCheck(firebaseApp, {
+  appCheckInstance = initializeAppCheck(firebaseApp, {
     provider: new ReCaptchaEnterpriseProvider(firebaseConfig.recaptchaSiteKey),
     isTokenAutoRefreshEnabled: true
   });
@@ -222,7 +223,7 @@ try {
     model: 'gemini-3.8-flash',
     generationConfig: { temperature: 0.35, maxOutputTokens: 700, candidateCount: 1 }
   }, { timeout: 60000 });
-  appCheckReady = Boolean(appCheck);
+  appCheckReady = Boolean(appCheckInstance);
 } catch (error) {
   console.error('Firebase AI Logic initialization failed:', error);
 }
@@ -382,8 +383,13 @@ function aiErrorMessage(error) {
   const fullReason = String(error?.message || error?.cause?.message || '').replace(/\s+/g, ' ').replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted]').replace(/Bearer\s+\S+/gi, 'Bearer [redacted]');
   const appCheckAt = fullReason.toLowerCase().indexOf('appcheck:');
   const reason = (appCheckAt >= 0 ? fullReason.slice(appCheckAt) : fullReason).slice(0, 400);
-  if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return `App Check 驗證失敗（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
+  if (error?.name === 'AppCheckTimeoutError') return 'App Check 驗證逾時：15 秒內未取得驗證權杖。請在一般瀏覽器視窗重試，並確認瀏覽器沒有封鎖 reCAPTCHA。';
+  if (error?.name === 'TimeoutError') {
+    const stage = String(error.message || '').replace(/^AI request timed out during\s*/i, '');
+    return `Gemini 請求超過 60 秒仍未完成${stage ? `（${stage}）` : ''}。`;
+  }
   if (/timeout|abort/.test(detail)) return '等待 Gemini 回覆超過 60 秒，已停止這次請求。請稍後重試。';
+  if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return `App Check 驗證失敗（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
   if (/429|quota|resource_exhausted/.test(detail)) return `Gemini 使用量可能已達上限（${code}），請稍後再試。`;
   if (/network|fetch|unavailable/.test(detail)) return `目前無法連線到 Gemini（${code}），請檢查網路後重試。`;
   return `AI 暫時無法回覆（${code}）。${reason ? '原因：' + reason : '請把括號內代碼傳給我。'}`;
@@ -402,7 +408,7 @@ async function submitAiQuestion(rawQuestion) {
   const userId = currentUser.uid;
   const requestController = new AbortController();
   aiAbortController = requestController;
-  let requestStage = '連線到 Firebase AI（包含 App Check 驗證）';
+  let requestStage = '等待 Gemini 回覆';
   let timeoutId = null;
   aiBusy = true;
   updateAiAvailability();
@@ -418,6 +424,22 @@ async function submitAiQuestion(rawQuestion) {
       '使用者問題：' + question
     ].join('\n\n');
     const requestPromise = (async () => {
+      requestStage = '檢查 App Check 驗證';
+      let appCheckTimeoutId = null;
+      try {
+        const tokenPromise = getToken(appCheckInstance);
+        tokenPromise.catch(() => {});
+        await Promise.race([tokenPromise, new Promise((resolve, reject) => {
+          appCheckTimeoutId = setTimeout(() => {
+            const error = new Error('App Check token request timed out');
+            error.name = 'AppCheckTimeoutError';
+            reject(error);
+          }, 15000);
+        })]);
+      } finally {
+        if (appCheckTimeoutId !== null) clearTimeout(appCheckTimeoutId);
+      }
+      requestStage = '呼叫 Gemini 模型';
       const result = await aiChat.sendMessage(prompt, { signal: requestController.signal, timeout: 60000 });
       requestStage = '讀取 Gemini 回覆';
       if (generationId !== aiGenerationId || currentUser?.uid !== userId || requestController.signal.aborted) return '';
