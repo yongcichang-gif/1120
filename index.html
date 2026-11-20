@@ -375,10 +375,11 @@ function aiTaskContext() {
 }
 function aiErrorMessage(error) {
   const detail = ((error?.code || '') + ' ' + (error?.message || '')).toLowerCase();
-  if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return 'App Check 驗證尚未完成。請確認目前網域已加入 Firebase App Check，並稍後再試。';
-  if (/429|quota|resource_exhausted/.test(detail)) return 'Gemini 目前的使用量已達上限，請稍後再試。';
-  if (/network|fetch|unavailable/.test(detail)) return '目前無法連線到 Gemini，請檢查網路後重試。';
-  return 'AI 暫時無法回覆，請稍後再試。';
+  const code = String(error?.code || (/\b403\b/.test(detail) ? 'HTTP 403' : error?.name || 'unknown')).replace(/[^a-z0-9._/-]/gi, '').slice(0, 80);
+  if (/app.?check|recaptcha|permission_denied|403/.test(detail)) return `App Check 驗證失敗（${code}）。請把括號內代碼傳給我。`;
+  if (/429|quota|resource_exhausted/.test(detail)) return `Gemini 使用量可能已達上限（${code}），請稍後再試。`;
+  if (/network|fetch|unavailable/.test(detail)) return `目前無法連線到 Gemini（${code}），請檢查網路後重試。`;
+  return `AI 暫時無法回覆（${code}），請把括號內代碼傳給我。`;
 }
 async function submitAiQuestion(rawQuestion) {
   const question = rawQuestion.trim();
